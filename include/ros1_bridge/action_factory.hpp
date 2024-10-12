@@ -334,7 +334,7 @@ public:
   }
 
 private:
-  class GoalHandler
+  class GoalHandler : public std::enable_shared_from_this<GoalHandler>
   {
 public:
     void cancel()
@@ -361,41 +361,54 @@ public:
       std::condition_variable cond_result;
       std::atomic<bool> result_ready(false);
 
+      auto weak_this = std::weak_ptr<GoalHandler>(this->shared_from_this());
+
       auto goal_handle = client_->sendGoal(
         goal1,
-        [this, &result_ready,
+        [weak_this, &result_ready,
         &cond_result](ROS1ClientGoalHandle goal_handle) mutable           // transition_cb
         {
+          auto shared_this = weak_this.lock();
+          if (!shared_this)
+          {
+            return;
+          }
+
           ROS_INFO("Goal [%s]", goal_handle.getCommState().toString().c_str());
           if (goal_handle.getCommState() == actionlib::CommState::RECALLING) {
             // cancelled before being processed
             auto result2 = std::make_shared<ROS2Result>();
-            gh2_->canceled(result2);
+            shared_this->gh2_->canceled(result2);
             return;
           } else if (goal_handle.getCommState() == actionlib::CommState::ACTIVE) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            gh1_ = std::make_shared<ROS1ClientGoalHandle>(goal_handle);
+            std::lock_guard<std::mutex> lock(shared_this->mutex_);
+            shared_this->gh1_ = std::make_shared<ROS1ClientGoalHandle>(goal_handle);
           } else if (goal_handle.getCommState() == actionlib::CommState::DONE) {
             auto result2 = std::make_shared<ROS2Result>();
             auto result1 = goal_handle.getResult();
             translate_result_1_to_2(*result2, *result1);
             ROS_INFO("Goal [%s]", goal_handle.getTerminalState().toString().c_str());
             if (goal_handle.getTerminalState() == actionlib::TerminalState::SUCCEEDED) {
-              gh2_->succeed(result2);
+              shared_this->gh2_->succeed(result2);
             } else {
-              gh2_->abort(result2);
+              shared_this->gh2_->abort(result2);
             }
             result_ready = true;
             cond_result.notify_one();
             return;
           }
         },
-        [this](ROS1ClientGoalHandle goal_handle, auto feedback1) mutable          // feedback_cb
+        [weak_this](ROS1ClientGoalHandle goal_handle, auto feedback1) mutable          // feedback_cb
         {
           (void)goal_handle;
+          auto shared_this = weak_this.lock();
+          if (!shared_this)
+          {
+            return;
+          }
           auto feedback2 = std::make_shared<ROS2Feedback>();
           translate_feedback_1_to_2(*feedback2, *feedback1);
-          gh2_->publish_feedback(feedback2);
+          shared_this->gh2_->publish_feedback(feedback2);
         });
 
       std::mutex mutex_result;
